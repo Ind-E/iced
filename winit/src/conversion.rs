@@ -2,11 +2,13 @@
 //!
 //! [`winit`]: https://github.com/rust-windowing/winit
 //! [`iced_runtime`]: https://github.com/iced-rs/iced/tree/master/runtime
+use winit::icon::RgbaIcon;
+
 use crate::core::input_method;
 use crate::core::keyboard;
 use crate::core::mouse;
 use crate::core::theme;
-use crate::core::touch;
+// use crate::core::touch;
 use crate::core::window;
 use crate::core::{Event, Point, Size};
 
@@ -36,7 +38,7 @@ pub fn window_attributes(
 
     attributes = attributes
         .with_title(title)
-        .with_inner_size(winit::dpi::LogicalSize {
+        .with_surface_size(winit::dpi::LogicalSize {
             width: settings.size.width * scale_factor,
             height: settings.size.height * scale_factor,
         })
@@ -60,14 +62,14 @@ pub fn window_attributes(
     }
 
     if let Some(min_size) = settings.min_size {
-        attributes = attributes.with_min_inner_size(winit::dpi::LogicalSize {
+        attributes = attributes.with_min_surface_size(winit::dpi::LogicalSize {
             width: min_size.width,
             height: min_size.height,
         });
     }
 
     if let Some(max_size) = settings.max_size {
-        attributes = attributes.with_max_inner_size(winit::dpi::LogicalSize {
+        attributes = attributes.with_max_surface_size(winit::dpi::LogicalSize {
             width: max_size.width,
             height: max_size.height,
         });
@@ -133,12 +135,73 @@ pub fn window_attributes(
         }
         #[cfg(feature = "wayland")]
         {
-            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::wayland::WindowAttributesWayland;
 
-            attributes = attributes.with_name(
+            let mut wayland_attributes = WindowAttributesWayland::default();
+
+            wayland_attributes = wayland_attributes.with_name(
                 &settings.platform_specific.application_id,
                 &settings.platform_specific.application_id,
             );
+
+            let layer_shell_settings = settings.platform_specific.layer_shell;
+
+            if let Some(layer) = layer_shell_settings.layer {
+                use crate::core::window::settings::KeyboardInteractivity;
+                use crate::core::window::settings::Layer;
+                use winit::platform::wayland;
+
+                wayland_attributes = wayland_attributes.with_layer_shell();
+
+                wayland_attributes = wayland_attributes.with_layer(match layer {
+                    Layer::Background => wayland::Layer::Background,
+                    Layer::Bottom => wayland::Layer::Bottom,
+                    Layer::Top => wayland::Layer::Top,
+                    Layer::Overlay => wayland::Layer::Overlay,
+                });
+
+                if let Some(value) = layer_shell_settings.exclusive_zone {
+                    wayland_attributes = wayland_attributes.with_exclusive_zone(value);
+                }
+
+                if let Some(value) = layer_shell_settings.keyboard_interactivity {
+                    let keyboard_interactivity = match value {
+                        KeyboardInteractivity::None => wayland::KeyboardInteractivity::None,
+                        KeyboardInteractivity::Exclusive => {
+                            wayland::KeyboardInteractivity::Exclusive
+                        }
+                        KeyboardInteractivity::OnDemand => wayland::KeyboardInteractivity::OnDemand,
+                    };
+                    wayland_attributes =
+                        wayland_attributes.with_keyboard_interactivity(keyboard_interactivity);
+                }
+
+                if let Some(value) = layer_shell_settings.anchor {
+                    wayland_attributes = wayland_attributes
+                        .with_anchor(wayland::Anchor::from_bits_retain(value.bits()));
+                }
+
+                if let Some(value) = layer_shell_settings.output {
+                    wayland_attributes = wayland_attributes.with_output(value);
+                }
+
+                if let Some((top, right, bottom, left)) = layer_shell_settings.margin {
+                    wayland_attributes = wayland_attributes.with_margin(top, right, bottom, left);
+                }
+
+                if let Some((x, y, width, height)) = layer_shell_settings.input_region {
+                    use winit::dpi::{LogicalPosition, LogicalSize};
+
+                    wayland_attributes = wayland_attributes
+                        .with_region(LogicalPosition::new(x, y), LogicalSize::new(width, height));
+                }
+
+                if let Some(namespace) = layer_shell_settings.namespace {
+                    wayland_attributes = wayland_attributes.with_namespace(namespace);
+                }
+            }
+
+            attributes = attributes.with_platform_attributes(Box::new(wayland_attributes));
         }
     }
 
@@ -155,7 +218,7 @@ pub fn window_event(
     use winit::event::WindowEvent;
 
     match event {
-        WindowEvent::Resized(new_size) => {
+        WindowEvent::SurfaceResized(new_size) => {
             let logical_size = new_size.to_logical(f64::from(scale_factor));
 
             Some(Event::Window(window::Event::Resized(Size {
@@ -164,16 +227,16 @@ pub fn window_event(
             })))
         }
         WindowEvent::CloseRequested => Some(Event::Window(window::Event::CloseRequested)),
-        WindowEvent::CursorMoved { position, .. } => {
+        WindowEvent::PointerMoved { position, .. } => {
             let position = position.to_logical::<f64>(f64::from(scale_factor));
 
             Some(Event::Mouse(mouse::Event::CursorMoved {
                 position: Point::new(position.x as f32, position.y as f32),
             }))
         }
-        WindowEvent::CursorEntered { .. } => Some(Event::Mouse(mouse::Event::CursorEntered)),
-        WindowEvent::CursorLeft { .. } => Some(Event::Mouse(mouse::Event::CursorLeft)),
-        WindowEvent::MouseInput { button, state, .. } => {
+        WindowEvent::PointerEntered { .. } => Some(Event::Mouse(mouse::Event::CursorEntered)),
+        WindowEvent::PointerLeft { .. } => Some(Event::Mouse(mouse::Event::CursorLeft)),
+        WindowEvent::PointerButton { button, state, .. } => {
             let button = mouse_button(button);
 
             Some(Event::Mouse(match state {
@@ -205,8 +268,7 @@ pub fn window_event(
             let key = {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-                    event.key_without_modifiers()
+                    event.key_without_modifiers
                 }
 
                 #[cfg(target_arch = "wasm32")]
@@ -220,9 +282,8 @@ pub fn window_event(
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     use crate::core::SmolStr;
-                    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
-                    event.text_with_all_modifiers().map(SmolStr::new)
+                    event.text_with_all_modifiers.map(SmolStr::new)
                 }
 
                 #[cfg(target_arch = "wasm32")]
@@ -283,20 +344,21 @@ pub fn window_event(
             }
             Ime::Commit(content) => input_method::Event::Commit(content),
             Ime::Disabled => input_method::Event::Closed,
+            Ime::DeleteSurrounding { .. } => todo!(),
         })),
         WindowEvent::Focused(focused) => Some(Event::Window(if focused {
             window::Event::Focused
         } else {
             window::Event::Unfocused
         })),
-        WindowEvent::HoveredFile(path) => {
-            Some(Event::Window(window::Event::FileHovered(path.clone())))
-        }
-        WindowEvent::DroppedFile(path) => {
-            Some(Event::Window(window::Event::FileDropped(path.clone())))
-        }
-        WindowEvent::HoveredFileCancelled => Some(Event::Window(window::Event::FilesHoveredLeft)),
-        WindowEvent::Touch(touch) => Some(Event::Touch(touch_event(touch, scale_factor))),
+        // WindowEvent::HoveredFile(path) => {
+        //     Some(Event::Window(window::Event::FileHovered(path.clone())))
+        // }
+        // WindowEvent::DroppedFile(path) => {
+        //     Some(Event::Window(window::Event::FileDropped(path.clone())))
+        // }
+        // WindowEvent::HoveredFileCancelled => Some(Event::Window(window::Event::FilesHoveredLeft)),
+        // WindowEvent::Touch(touch) => Some(Event::Touch(touch_event(touch, scale_factor))),
         WindowEvent::Moved(position) => {
             let winit::dpi::LogicalPosition { x, y } = position.to_logical(f64::from(scale_factor));
 
@@ -337,11 +399,12 @@ pub fn position(
             }))
         }
         window::Position::SpecificWith(to_position) => {
-            if let Some(monitor) = monitor {
-                let start = monitor.position();
-
+            if let Some(monitor) = monitor
+                && let Some(video_mode) = monitor.current_video_mode()
+                && let Some(start) = monitor.position()
+            {
                 let resolution: winit::dpi::LogicalSize<f32> =
-                    monitor.size().to_logical(monitor.scale_factor());
+                    video_mode.size().to_logical(monitor.scale_factor());
 
                 let position = to_position(size, Size::new(resolution.width, resolution.height));
 
@@ -362,11 +425,12 @@ pub fn position(
             }
         }
         window::Position::Centered => {
-            if let Some(monitor) = monitor {
-                let start = monitor.position();
-
+            if let Some(monitor) = monitor
+                && let Some(video_mode) = monitor.current_video_mode()
+                && let Some(start) = monitor.position()
+            {
                 let resolution: winit::dpi::LogicalSize<f64> =
-                    monitor.size().to_logical(monitor.scale_factor());
+                    video_mode.size().to_logical(monitor.scale_factor());
 
                 let centered: winit::dpi::PhysicalPosition<i32> = winit::dpi::LogicalPosition {
                     x: (resolution.width - f64::from(size.width)) / 2.0,
@@ -483,14 +547,19 @@ pub fn mouse_interaction(interaction: mouse::Interaction) -> Option<winit::windo
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 /// [`iced`]: https://github.com/iced-rs/iced/tree/0.12
-pub fn mouse_button(mouse_button: winit::event::MouseButton) -> mouse::Button {
-    match mouse_button {
-        winit::event::MouseButton::Left => mouse::Button::Left,
-        winit::event::MouseButton::Right => mouse::Button::Right,
-        winit::event::MouseButton::Middle => mouse::Button::Middle,
-        winit::event::MouseButton::Back => mouse::Button::Back,
-        winit::event::MouseButton::Forward => mouse::Button::Forward,
-        winit::event::MouseButton::Other(other) => mouse::Button::Other(other),
+pub fn mouse_button(button_source: winit::event::ButtonSource) -> mouse::Button {
+    match button_source {
+        winit::event::ButtonSource::Mouse(mouse_button) => match mouse_button {
+            winit::event::MouseButton::Left => mouse::Button::Left,
+            winit::event::MouseButton::Right => mouse::Button::Right,
+            winit::event::MouseButton::Middle => mouse::Button::Middle,
+            winit::event::MouseButton::Back => mouse::Button::Back,
+            winit::event::MouseButton::Forward => mouse::Button::Forward,
+            other => mouse::Button::Other(other as u16),
+        },
+        winit::event::ButtonSource::Touch { .. } => mouse::Button::Left,
+        winit::event::ButtonSource::TabletTool { .. } => mouse::Button::Left,
+        winit::event::ButtonSource::Unknown(_) => mouse::Button::Left,
     }
 }
 
@@ -505,7 +574,7 @@ pub fn modifiers(modifiers: winit::keyboard::ModifiersState) -> keyboard::Modifi
     result.set(keyboard::Modifiers::SHIFT, modifiers.shift_key());
     result.set(keyboard::Modifiers::CTRL, modifiers.control_key());
     result.set(keyboard::Modifiers::ALT, modifiers.alt_key());
-    result.set(keyboard::Modifiers::LOGO, modifiers.super_key());
+    result.set(keyboard::Modifiers::LOGO, modifiers.meta_key());
 
     result
 }
@@ -521,21 +590,21 @@ pub fn cursor_position(position: winit::dpi::PhysicalPosition<f64>, scale_factor
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 /// [`iced`]: https://github.com/iced-rs/iced/tree/0.12
-pub fn touch_event(touch: winit::event::Touch, scale_factor: f32) -> touch::Event {
-    let id = touch::Finger(touch.id);
-    let position = {
-        let location = touch.location.to_logical::<f64>(f64::from(scale_factor));
-
-        Point::new(location.x as f32, location.y as f32)
-    };
-
-    match touch.phase {
-        winit::event::TouchPhase::Started => touch::Event::FingerPressed { id, position },
-        winit::event::TouchPhase::Moved => touch::Event::FingerMoved { id, position },
-        winit::event::TouchPhase::Ended => touch::Event::FingerLifted { id, position },
-        winit::event::TouchPhase::Cancelled => touch::Event::FingerLost { id, position },
-    }
-}
+// pub fn touch_event(touch: winit::event::Touch, scale_factor: f32) -> touch::Event {
+//     let id = touch::Finger(touch.id);
+//     let position = {
+//         let location = touch.location.to_logical::<f64>(f64::from(scale_factor));
+//
+//         Point::new(location.x as f32, location.y as f32)
+//     };
+//
+//     match touch.phase {
+//         winit::event::TouchPhase::Started => touch::Event::FingerPressed { id, position },
+//         winit::event::TouchPhase::Moved => touch::Event::FingerMoved { id, position },
+//         winit::event::TouchPhase::Ended => touch::Event::FingerLifted { id, position },
+//         winit::event::TouchPhase::Cancelled => touch::Event::FingerLost { id, position },
+//     }
+// }
 
 /// Converts a `Key` from [`winit`] to an [`iced`] key.
 ///
@@ -560,11 +629,9 @@ pub fn key(key: winit::keyboard::Key) -> keyboard::Key {
             NamedKey::Symbol => Named::Symbol,
             NamedKey::SymbolLock => Named::SymbolLock,
             NamedKey::Meta => Named::Meta,
-            NamedKey::Hyper => Named::Hyper,
-            NamedKey::Super => Named::Super,
             NamedKey::Enter => Named::Enter,
             NamedKey::Tab => Named::Tab,
-            NamedKey::Space => Named::Space,
+            // NamedKey::Space => Named::Space,
             NamedKey::ArrowDown => Named::ArrowDown,
             NamedKey::ArrowLeft => Named::ArrowLeft,
             NamedKey::ArrowRight => Named::ArrowRight,
@@ -943,8 +1010,8 @@ pub fn key_code(key_code: winit::keyboard::KeyCode) -> Option<keyboard::key::Cod
         KeyCode::ControlLeft => keyboard::key::Code::ControlLeft,
         KeyCode::ControlRight => keyboard::key::Code::ControlRight,
         KeyCode::Enter => keyboard::key::Code::Enter,
-        KeyCode::SuperLeft => keyboard::key::Code::SuperLeft,
-        KeyCode::SuperRight => keyboard::key::Code::SuperRight,
+        KeyCode::MetaLeft => keyboard::key::Code::SuperLeft,
+        KeyCode::MetaRight => keyboard::key::Code::SuperRight,
         KeyCode::ShiftLeft => keyboard::key::Code::ShiftLeft,
         KeyCode::ShiftRight => keyboard::key::Code::ShiftRight,
         KeyCode::Space => keyboard::key::Code::Space,
@@ -1027,9 +1094,6 @@ pub fn key_code(key_code: winit::keyboard::KeyCode) -> Option<keyboard::key::Cod
         KeyCode::AudioVolumeMute => keyboard::key::Code::AudioVolumeMute,
         KeyCode::AudioVolumeUp => keyboard::key::Code::AudioVolumeUp,
         KeyCode::WakeUp => keyboard::key::Code::WakeUp,
-        KeyCode::Meta => keyboard::key::Code::Meta,
-        KeyCode::Hyper => keyboard::key::Code::Hyper,
-        KeyCode::Turbo => keyboard::key::Code::Turbo,
         KeyCode::Abort => keyboard::key::Code::Abort,
         KeyCode::Resume => keyboard::key::Code::Resume,
         KeyCode::Suspend => keyboard::key::Code::Suspend,
@@ -1098,6 +1162,7 @@ pub fn native_key_code(
         NativeKeyCode::MacOS(code) => keyboard::key::NativeCode::MacOS(code),
         NativeKeyCode::Windows(code) => keyboard::key::NativeCode::Windows(code),
         NativeKeyCode::Xkb(code) => keyboard::key::NativeCode::Xkb(code),
+        NativeKeyCode::Ohos(_code) => keyboard::key::NativeCode::Unidentified,
     }
 }
 
@@ -1131,7 +1196,11 @@ pub fn resize_direction(resize_direction: window::Direction) -> winit::window::R
 pub fn icon(icon: window::Icon) -> Option<winit::window::Icon> {
     let (pixels, size) = icon.into_raw();
 
-    winit::window::Icon::from_rgba(pixels, size.width, size.height).ok()
+    if let Ok(rgba) = RgbaIcon::new(pixels, size.width, size.height) {
+        Some(winit::window::Icon::from(rgba))
+    } else {
+        None
+    }
 }
 
 /// Converts some [`input_method::Purpose`] into its `winit` counterpart.

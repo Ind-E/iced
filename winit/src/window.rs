@@ -49,13 +49,13 @@ where
     pub fn insert(
         &mut self,
         id: Id,
-        window: Arc<winit::window::Window>,
+        window: Arc<dyn winit::window::Window>,
         program: &program::Instance<P>,
         compositor: &mut C,
         exit_on_close_request: bool,
         system_theme: theme::Mode,
     ) -> &mut Window<P, C> {
-        let state = State::new(program, id, &window, system_theme);
+        let state = State::new(program, id, window.as_ref(), system_theme);
         let surface_size = state.physical_size();
         let surface_version = state.surface_version();
         let surface =
@@ -156,7 +156,7 @@ where
     C: Compositor<Renderer = P::Renderer>,
     P::Theme: theme::Base,
 {
-    pub raw: Arc<winit::window::Window>,
+    pub raw: Arc<dyn winit::window::Window>,
     pub state: State<P>,
     pub exit_on_close_request: bool,
     pub mouse_interaction: mouse::Interaction,
@@ -239,7 +239,7 @@ where
     pub fn update_mouse(&mut self, interaction: mouse::Interaction) {
         if interaction != self.mouse_interaction {
             if let Some(icon) = conversion::mouse_interaction(interaction) {
-                self.raw.set_cursor(icon);
+                self.raw.set_cursor(winit::cursor::Cursor::Icon(icon));
 
                 if self.mouse_interaction == mouse::Interaction::Hidden {
                     self.raw.set_cursor_visible(true);
@@ -270,8 +270,14 @@ where
 
         if self.ime_state != Some((cursor, purpose)) {
             self.raw.set_ime_cursor_area(
-                LogicalPosition::new(cursor.x, cursor.y),
-                LogicalSize::new(cursor.width, cursor.height),
+                winit::dpi::Position::Logical(LogicalPosition::new(
+                    cursor.x.into(),
+                    cursor.y.into(),
+                )),
+                winit::dpi::Size::Logical(LogicalSize::new(
+                    cursor.width.into(),
+                    cursor.height.into(),
+                )),
             );
             self.raw.set_ime_purpose(conversion::ime_purpose(purpose));
 

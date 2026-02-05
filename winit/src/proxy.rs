@@ -1,5 +1,5 @@
 use crate::futures::futures::{
-    Future, Sink, StreamExt,
+    Future, Sink, SinkExt, StreamExt,
     channel::mpsc,
     select,
     task::{Context, Poll},
@@ -12,7 +12,7 @@ use std::pin::Pin;
 /// An event loop proxy with backpressure that implements `Sink`.
 #[derive(Debug)]
 pub struct Proxy<T: 'static> {
-    raw: winit::event_loop::EventLoopProxy<Action<T>>,
+    raw: winit::event_loop::EventLoopProxy,
     sender: mpsc::Sender<Action<T>>,
     notifier: mpsc::Sender<usize>,
 }
@@ -32,10 +32,11 @@ impl<T: 'static> Proxy<T> {
 
     /// Creates a new [`Proxy`] from an `EventLoopProxy`.
     pub fn new(
-        raw: winit::event_loop::EventLoopProxy<Action<T>>,
-    ) -> (Self, impl Future<Output = ()>) {
+        raw: winit::event_loop::EventLoopProxy,
+    ) -> (Self, impl Future<Output = ()>, mpsc::Receiver<Action<T>>) {
         let (notifier, mut processed) = mpsc::channel(Self::MAX_SIZE);
         let (sender, mut receiver) = mpsc::channel(Self::MAX_SIZE);
+        let (mut runner_sender, runner_receiver) = mpsc::channel(Self::MAX_SIZE);
         let proxy = raw.clone();
 
         let worker = async move {
@@ -45,9 +46,10 @@ impl<T: 'static> Proxy<T> {
                 if count < Self::MAX_SIZE {
                     select! {
                         message = receiver.select_next_some() => {
-                            let _ = proxy.send_event(message);
-                            count += 1;
-
+                            if runner_sender.send(message).await.is_ok() {
+                                proxy.wake_up();
+                                count += 1;
+                            }
                         }
                         amount = processed.select_next_some() => {
                             count = count.saturating_sub(amount);
@@ -72,6 +74,7 @@ impl<T: 'static> Proxy<T> {
                 notifier,
             },
             worker,
+            runner_receiver,
         )
     }
 
@@ -88,7 +91,9 @@ impl<T: 'static> Proxy<T> {
     /// Note: This skips the backpressure mechanism with an unbounded
     /// channel. Use sparingly!
     pub fn send_action(&self, action: Action<T>) {
-        let _ = self.raw.send_event(action);
+        let mut sender = self.sender.clone();
+        let _ = sender.try_send(action);
+        self.raw.wake_up();
     }
 
     /// Frees an amount of slots for additional messages to be queued in

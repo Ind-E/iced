@@ -29,6 +29,9 @@ use crate::window::{Icon, Level, Position};
 
 pub use platform::PlatformSpecific;
 
+#[cfg(target_os = "linux")]
+pub use platform::{Anchor, KeyboardInteractivity, Layer, LayerShellSettings};
+
 /// The window settings of an application.
 #[derive(Debug, Clone)]
 pub struct Settings {

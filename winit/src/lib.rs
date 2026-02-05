@@ -42,7 +42,7 @@ use crate::core::renderer;
 use crate::core::theme;
 use crate::core::time::Instant;
 use crate::core::widget::operation;
-use crate::core::{Point, Renderer, Size};
+use crate::core::{Point, Size};
 use crate::futures::futures::channel::mpsc;
 use crate::futures::futures::channel::oneshot;
 use crate::futures::futures::task;
@@ -76,14 +76,12 @@ where
     let settings = program.settings();
     let window_settings = program.window();
 
-    let event_loop = EventLoop::with_user_event()
-        .build()
-        .expect("Create event loop");
+    let event_loop = EventLoop::builder().build().expect("Create event loop");
 
     let graphics_settings = settings.clone().into();
     let display_handle = event_loop.owned_display_handle();
 
-    let (proxy, worker) = Proxy::new(event_loop.create_proxy());
+    let (proxy, worker, action_receiver) = Proxy::new(event_loop.create_proxy());
 
     #[cfg(feature = "debug")]
     {
@@ -122,7 +120,7 @@ where
         runtime.enter(|| program.subscription().map(Action::Output)),
     ));
 
-    let (event_sender, event_receiver) = mpsc::unbounded();
+    let (event_sender, event_receiver) = mpsc::unbounded::<Event<P::Message>>();
     let (control_sender, control_receiver) = mpsc::unbounded();
     let (system_theme_sender, system_theme_receiver) = oneshot::channel();
 
@@ -145,8 +143,9 @@ where
         instance: std::pin::Pin<Box<F>>,
         context: task::Context<'static>,
         id: Option<String>,
-        sender: mpsc::UnboundedSender<Event<Action<Message>>>,
+        sender: mpsc::UnboundedSender<Event<Message>>,
         receiver: mpsc::UnboundedReceiver<Control>,
+        action_receiver: mpsc::Receiver<Action<Message>>,
         error: Option<Error>,
         system_theme: Option<oneshot::Sender<theme::Mode>>,
 
@@ -160,6 +159,7 @@ where
         id: settings.id,
         sender: event_sender,
         receiver: control_receiver,
+        action_receiver,
         error: None,
         system_theme: Some(system_theme_sender),
 
@@ -169,11 +169,11 @@ where
 
     boot_span.finish();
 
-    impl<Message, F> winit::application::ApplicationHandler<Action<Message>> for Runner<Message, F>
+    impl<Message, F> winit::application::ApplicationHandler for Runner<Message, F>
     where
         F: Future<Output = ()>,
     {
-        fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        fn resumed(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
             if let Some(sender) = self.system_theme.take() {
                 let _ = sender.send(
                     event_loop
@@ -186,18 +186,18 @@ where
 
         fn new_events(
             &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
+            event_loop: &dyn winit::event_loop::ActiveEventLoop,
             cause: winit::event::StartCause,
         ) {
             self.process_event(
                 event_loop,
-                Event::EventLoopAwakened(winit::event::Event::NewEvents(cause)),
+                Event::EventLoopAwakened(WinitEvent::NewEvents(cause)),
             );
         }
 
         fn window_event(
             &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
+            event_loop: &dyn winit::event_loop::ActiveEventLoop,
             window_id: winit::window::WindowId,
             event: winit::event::WindowEvent,
         ) {
@@ -209,7 +209,7 @@ where
 
             self.process_event(
                 event_loop,
-                Event::EventLoopAwakened(winit::event::Event::WindowEvent { window_id, event }),
+                Event::EventLoopAwakened(WinitEvent::WindowEvent(window_id, event)),
             );
 
             // TODO: Remove when unnecessary
@@ -227,32 +227,59 @@ where
             }
         }
 
-        fn user_event(
-            &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
-            action: Action<Message>,
-        ) {
+        // fn user_event(
+        //     &mut self,
+        //     event_loop: &dyn winit::event_loop::ActiveEventLoop,
+        //     action: Action<Message>,
+        // ) {
+        //     self.process_event(
+        //         event_loop,
+        //         Event::EventLoopAwakened(WinitEvent::UserEvent(action)),
+        //     );
+        // }
+
+        fn can_create_surfaces(&mut self, _event_loop: &dyn winit::event_loop::ActiveEventLoop) {}
+
+        fn about_to_wait(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
             self.process_event(
                 event_loop,
-                Event::EventLoopAwakened(winit::event::Event::UserEvent(action)),
+                Event::EventLoopAwakened(WinitEvent::AboutToWait),
             );
         }
 
-        fn received_url(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, url: String) {
-            self.process_event(
-                event_loop,
-                Event::EventLoopAwakened(winit::event::Event::PlatformSpecific(
-                    winit::event::PlatformSpecific::MacOS(winit::event::MacOS::ReceivedUrl(url)),
-                )),
-            );
+        fn proxy_wake_up(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
+            while let Ok(Some(action)) = self.action_receiver.try_next() {
+                self.process_event(
+                    event_loop,
+                    Event::EventLoopAwakened(WinitEvent::UserEvent(action)),
+                );
+            }
         }
 
-        fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-            self.process_event(
-                event_loop,
-                Event::EventLoopAwakened(winit::event::Event::AboutToWait),
-            );
-        }
+        // fn device_event(
+        //     &mut self,
+        //     event_loop: &dyn winit::event_loop::ActiveEventLoop,
+        //     device_id: Option<winit::event::DeviceId>,
+        //     event: winit::event::DeviceEvent,
+        // ) {
+        //     let _ = (event_loop, device_id, event);
+        // }
+
+        // fn suspended(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
+        //     let _ = event_loop;
+        // }
+        //
+        // fn destroy_surfaces(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
+        //     let _ = event_loop;
+        // }
+        //
+        // fn memory_warning(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
+        //     let _ = event_loop;
+        // }
+        //
+        // fn macos_handler(&mut self) -> Option<&mut dyn winit::application::macos::ApplicationHandlerExtMacOS> {
+        //     None
+        // }
     }
 
     impl<Message, F> Runner<Message, F>
@@ -261,8 +288,8 @@ where
     {
         fn process_event(
             &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
-            event: Event<Action<Message>>,
+            event_loop: &dyn winit::event_loop::ActiveEventLoop,
+            event: Event<Message>,
         ) {
             if event_loop.exiting() {
                 return;
@@ -382,7 +409,7 @@ where
                                     event_loop,
                                     Event::WindowCreated {
                                         id,
-                                        window: Arc::new(window),
+                                        window: Arc::from(window),
                                         exit_on_close_request,
                                         make_visible: visible,
                                         on_open,
@@ -437,15 +464,24 @@ where
 }
 
 #[derive(Debug)]
+enum WinitEvent<Message> {
+    NewEvents(winit::event::StartCause),
+    StartCause(winit::event::StartCause),
+    UserEvent(Action<Message>),
+    WindowEvent(winit::window::WindowId, winit::event::WindowEvent),
+    AboutToWait,
+}
+
+#[derive(Debug)]
 enum Event<Message: 'static> {
     WindowCreated {
         id: window::Id,
-        window: Arc<winit::window::Window>,
+        window: Arc<dyn winit::window::Window>,
         exit_on_close_request: bool,
         make_visible: bool,
         on_open: oneshot::Sender<window::Id>,
     },
-    EventLoopAwakened(winit::event::Event<Message>),
+    EventLoopAwakened(WinitEvent<Message>),
     Exit,
 }
 
@@ -469,7 +505,7 @@ async fn run_instance<P>(
     mut program: program::Instance<P>,
     mut runtime: Runtime<P::Executor, Proxy<P::Message>, Action<P::Message>>,
     mut proxy: Proxy<P::Message>,
-    mut event_receiver: mpsc::UnboundedReceiver<Event<Action<P::Message>>>,
+    mut event_receiver: mpsc::UnboundedReceiver<Event<P::Message>>,
     mut control_sender: mpsc::UnboundedSender<Control>,
     display_handle: winit::event_loop::OwnedDisplayHandle,
     is_daemon: bool,
@@ -480,7 +516,6 @@ async fn run_instance<P>(
     P: Program + 'static,
     P::Theme: theme::Base,
 {
-    use winit::event;
     use winit::event_loop::ControlFlow;
 
     let mut window_manager = WindowManager::new();
@@ -682,12 +717,14 @@ async fn run_instance<P>(
             }
             Event::EventLoopAwakened(event) => {
                 match event {
-                    event::Event::NewEvents(event::StartCause::Init) => {
+                    WinitEvent::StartCause(winit::event::StartCause::Init) => {
                         for (_id, window) in window_manager.iter_mut() {
                             window.raw.request_redraw();
                         }
                     }
-                    event::Event::NewEvents(event::StartCause::ResumeTimeReached { .. }) => {
+                    WinitEvent::StartCause(winit::event::StartCause::ResumeTimeReached {
+                        ..
+                    }) => {
                         let now = Instant::now();
 
                         for (_id, window) in window_manager.iter_mut() {
@@ -707,16 +744,7 @@ async fn run_instance<P>(
                                 control_sender.start_send(Control::ChangeFlow(ControlFlow::Wait));
                         }
                     }
-                    event::Event::PlatformSpecific(event::PlatformSpecific::MacOS(
-                        event::MacOS::ReceivedUrl(url),
-                    )) => {
-                        runtime.broadcast(subscription::Event::PlatformSpecific(
-                            subscription::PlatformSpecific::MacOS(
-                                subscription::MacOS::ReceivedUrl(url),
-                            ),
-                        ));
-                    }
-                    event::Event::UserEvent(action) => {
+                    WinitEvent::UserEvent(action) => {
                         run_action(
                             action,
                             &program,
@@ -734,11 +762,7 @@ async fn run_instance<P>(
                         );
                         actions += 1;
                     }
-                    event::Event::WindowEvent {
-                        window_id: id,
-                        event: event::WindowEvent::RedrawRequested,
-                        ..
-                    } => {
+                    WinitEvent::WindowEvent(id, winit::event::WindowEvent::RedrawRequested) => {
                         let Some(mut current_compositor) = compositor.as_mut() else {
                             continue;
                         };
@@ -977,10 +1001,7 @@ async fn run_instance<P>(
                             },
                         }
                     }
-                    event::Event::WindowEvent {
-                        event: window_event,
-                        window_id,
-                    } => {
+                    WinitEvent::WindowEvent(window_id, window_event) => {
                         if !is_daemon
                             && matches!(window_event, winit::event::WindowEvent::Destroyed)
                             && !is_window_opening
@@ -998,7 +1019,7 @@ async fn run_instance<P>(
                         };
 
                         match window_event {
-                            winit::event::WindowEvent::Resized(_) => {
+                            winit::event::WindowEvent::SurfaceResized(_) => {
                                 window.raw.request_redraw();
                             }
                             winit::event::WindowEvent::ThemeChanged(theme) => {
@@ -1033,7 +1054,9 @@ async fn run_instance<P>(
                                 &mut system_theme,
                             );
                         } else {
-                            window.state.update(&program, &window.raw, &window_event);
+                            window
+                                .state
+                                .update(&program, window.raw.as_ref(), &window_event);
 
                             if let Some(event) = conversion::window_event(
                                 window_event,
@@ -1044,7 +1067,7 @@ async fn run_instance<P>(
                             }
                         }
                     }
-                    event::Event::AboutToWait => {
+                    WinitEvent::AboutToWait => {
                         if actions > 0 {
                             proxy.free_slots(actions);
                             actions = 0;
@@ -1343,46 +1366,54 @@ fn run_action<'a, P, C>(
             }
             window::Action::Resize(id, size) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    let _ = window.raw.request_inner_size(
+                    let _ = window.raw.request_surface_size(winit::dpi::Size::Physical(
                         winit::dpi::LogicalSize {
                             width: size.width,
                             height: size.height,
                         }
-                        .to_physical::<f32>(f64::from(window.state.scale_factor())),
-                    );
+                        .to_physical::<u32>(f64::from(window.state.scale_factor())),
+                    ));
                 }
             }
             window::Action::SetMinSize(id, size) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    window.raw.set_min_inner_size(size.map(|size| {
-                        winit::dpi::LogicalSize {
-                            width: size.width,
-                            height: size.height,
-                        }
-                        .to_physical::<f32>(f64::from(window.state.scale_factor()))
+                    window.raw.set_min_surface_size(size.map(|size| {
+                        winit::dpi::Size::Physical(
+                            winit::dpi::LogicalSize {
+                                width: size.width,
+                                height: size.height,
+                            }
+                            .to_physical::<u32>(f64::from(window.state.scale_factor())),
+                        )
                     }));
                 }
             }
             window::Action::SetMaxSize(id, size) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    window.raw.set_max_inner_size(size.map(|size| {
-                        winit::dpi::LogicalSize {
-                            width: size.width,
-                            height: size.height,
-                        }
-                        .to_physical::<f32>(f64::from(window.state.scale_factor()))
+                    window.raw.set_max_surface_size(size.map(|size| {
+                        winit::dpi::Size::Physical(
+                            winit::dpi::LogicalSize {
+                                width: size.width,
+                                height: size.height,
+                            }
+                            .to_physical::<u32>(f64::from(window.state.scale_factor())),
+                        )
                     }));
                 }
             }
             window::Action::SetResizeIncrements(id, increments) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    window.raw.set_resize_increments(increments.map(|size| {
-                        winit::dpi::LogicalSize {
-                            width: size.width,
-                            height: size.height,
-                        }
-                        .to_physical::<f32>(f64::from(window.state.scale_factor()))
-                    }));
+                    window
+                        .raw
+                        .set_surface_resize_increments(increments.map(|size| {
+                            winit::dpi::Size::Physical(
+                                winit::dpi::LogicalSize {
+                                    width: size.width,
+                                    height: size.height,
+                                }
+                                .to_physical::<u32>(f64::from(window.state.scale_factor())),
+                            )
+                        }));
                 }
             }
             window::Action::SetResizable(id, resizable) => {
@@ -1440,10 +1471,13 @@ fn run_action<'a, P, C>(
             }
             window::Action::Move(id, position) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    window.raw.set_outer_position(winit::dpi::LogicalPosition {
-                        x: position.x,
-                        y: position.y,
-                    });
+                    window.raw.set_outer_position(
+                        winit::dpi::LogicalPosition {
+                            x: position.x,
+                            y: position.y,
+                        }
+                        .into(),
+                    );
                 }
             }
             window::Action::SetMode(id, mode) => {
@@ -1501,15 +1535,18 @@ fn run_action<'a, P, C>(
                 if let Some(window) = window_manager.get_mut(id)
                     && let mouse::Cursor::Available(point) = window.state.cursor()
                 {
-                    window.raw.show_window_menu(winit::dpi::LogicalPosition {
-                        x: point.x,
-                        y: point.y,
-                    });
+                    window.raw.show_window_menu(
+                        winit::dpi::LogicalPosition {
+                            x: point.x,
+                            y: point.y,
+                        }
+                        .into(),
+                    );
                 }
             }
             window::Action::GetRawId(id, channel) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    let _ = channel.send(window.raw.id().into());
+                    let _ = channel.send(window.raw.id().into_raw() as u64);
                 }
             }
             window::Action::Run(id, f) => {
@@ -1548,7 +1585,11 @@ fn run_action<'a, P, C>(
                 if let Some(window) = window_manager.get(id) {
                     let size = window.raw.current_monitor().map(|monitor| {
                         let scale = window.state.scale_factor();
-                        let size = monitor.size().to_logical(f64::from(scale));
+                        let size = monitor
+                            .current_video_mode()
+                            .unwrap()
+                            .size()
+                            .to_logical(f64::from(scale));
 
                         Size::new(size.width, size.height)
                     });
@@ -1611,7 +1652,7 @@ fn run_action<'a, P, C>(
                 for (_id, window) in window_manager.iter_mut() {
                     window.state.update(
                         program,
-                        &window.raw,
+                        window.raw.as_ref(),
                         &winit::event::WindowEvent::ThemeChanged(theme),
                     );
                 }
@@ -1695,7 +1736,7 @@ where
     P::Theme: theme::Base,
 {
     for (id, window) in window_manager.iter_mut() {
-        window.state.synchronize(program, id, &window.raw);
+        window.state.synchronize(program, id, window.raw.as_ref());
 
         #[cfg(feature = "hinting")]
         window.renderer.hint(window.state.scale_factor());
